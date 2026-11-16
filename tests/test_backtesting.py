@@ -110,3 +110,56 @@ def test_rejeita_janela_invalida(dados_mercado):
             benchmark,
             lookback=0,
         )
+
+def test_custos_reduzem_retorno(dados_mercado):
+    precos, benchmark = dados_mercado
+
+    sem_custos, _ = executar_backtest_walk_forward(
+        precos, benchmark,
+        lookback=30,
+        frequencia_rebalanceamento=10,
+        numero_carteiras=100,
+        custo_total_bps=0,
+    )
+
+    com_custos, _ = executar_backtest_walk_forward(
+        precos, benchmark,
+        lookback=30,
+        frequencia_rebalanceamento=10,
+        numero_carteiras=100,
+        custo_total_bps=10,
+    )
+
+    assert (
+        com_custos["Estrategia"].sum()
+        < sem_custos["Estrategia"].sum()
+    )
+
+
+def test_backtest_registra_turnover_e_custos(dados_mercado):
+    precos, benchmark = dados_mercado
+
+    resultados, _ = executar_backtest_walk_forward(
+        precos, benchmark,
+        lookback=30,
+        frequencia_rebalanceamento=10,
+        numero_carteiras=100,
+        custo_total_bps=10,
+    )
+
+    assert "Turnover" in resultados.columns
+    assert "Custos (%)" in resultados.columns
+    assert resultados["Turnover"].max() > 0
+    assert resultados["Custos (%)"].sum() > 0
+
+
+def test_rejeita_custo_negativo(dados_mercado):
+    precos, benchmark = dados_mercado
+
+    with pytest.raises(ValueError):
+        executar_backtest_walk_forward(
+            precos,
+            benchmark,
+            lookback=30,
+            custo_total_bps=-10,
+        )

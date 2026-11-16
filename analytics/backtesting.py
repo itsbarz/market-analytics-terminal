@@ -16,14 +16,15 @@ def executar_backtest_walk_forward(
     numero_carteiras: int = 3000,
     taxa_livre_risco_anual: float = 0.0,
     seed: int = 42,
+    custo_total_bps: float = 10.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Backtesting walk-forward com otimização de carteira.
+    Walk-forward backtest com custos de transação.
 
-    Estima os pesos usando somente retornos passados e aplica
-    esses pesos ao período seguinte.
+    custo_total_bps representa o custo combinado estimado
+    de execução, taxas e slippage, em basis points.
 
-    Retornos são expressos em porcentagem.
+    100 bps = 1%.
     """
 
     if precos.empty or len(precos.columns) < 2:
@@ -41,6 +42,9 @@ def executar_backtest_walk_forward(
     if numero_carteiras < 1:
         raise ValueError("Número de carteiras inválido.")
 
+    if not np.isfinite(custo_total_bps) or custo_total_bps < 0:
+        raise ValueError("O custo em bps deve ser finito e não negativo.")
+
     if not isinstance(benchmark, pd.Series):
         raise ValueError("O benchmark deve ser uma Series.")
 
@@ -48,10 +52,10 @@ def executar_backtest_walk_forward(
     benchmark = benchmark.sort_index().astype(float)
 
     if not np.isfinite(precos.to_numpy()).all():
-        raise ValueError("Os preços dos ativos contêm valores inválidos.")
+        raise ValueError("Preços dos ativos inválidos.")
 
     if not np.isfinite(benchmark.to_numpy()).all():
-        raise ValueError("O benchmark contém valores inválidos.")
+        raise ValueError("Preços do benchmark inválidos.")
 
     if (precos <= 0).any().any() or (benchmark <= 0).any():
         raise ValueError("Os preços devem ser positivos.")
@@ -72,6 +76,8 @@ def executar_backtest_walk_forward(
     resultados = []
     historico_pesos = []
 
+    pesos_atuais = None
+
     for inicio in range(
         lookback,
         len(retornos),
@@ -82,7 +88,6 @@ def executar_backtest_walk_forward(
             len(retornos),
         )
 
-        # Somente dados anteriores ao período testado.
         janela_treino = retornos_ativos.iloc[
             inicio - lookback:inicio
         ]
@@ -96,32 +101,56 @@ def executar_backtest_walk_forward(
 
         melhor = obter_carteira_max_sharpe(simulacoes)
 
-        pesos = pd.Series(
-            {
-                ativo: melhor[f"Peso {ativo} (%)"] / 100
-                for ativo in precos.columns
-            }
-        )
+        novos_pesos = pd.Series({
+            ativo: melhor[f"Peso {ativo} (%)"] / 100
+            for ativo in precos.columns
+        })
 
-        # Aplicação dos pesos somente no período futuro.
+        if pesos_atuais is None:
+            # Primeira alocação: carteira parte de caixa.
+            turnover = 1.0
+        else:
+            turnover = float(
+                (novos_pesos - pesos_atuais).abs().sum() / 2
+            )
+
         periodo_teste = retornos_ativos.iloc[inicio:fim]
 
-        retorno_estrategia = periodo_teste.dot(pesos)
+        retorno_bruto = periodo_teste.dot(novos_pesos)
+
+        custo_pct = turnover * custo_total_bps / 100
+
+        retorno_liquido = retorno_bruto.copy()
+
+        # O custo é aplicado no primeiro pregão após o rebalanceamento.
+        retorno_liquido.iloc[0] -= custo_pct
 
         bloco = pd.DataFrame({
-            "Estrategia": retorno_estrategia,
+            "Estrategia": retorno_liquido,
             "Benchmark": retornos_benchmark.iloc[inicio:fim],
+            "Turnover": 0.0,
+            "Custos (%)": 0.0,
         })
+
+        bloco.iloc[0, bloco.columns.get_loc("Turnover")] = turnover * 100
+        bloco.iloc[0, bloco.columns.get_loc("Custos (%)")] = custo_pct
 
         resultados.append(bloco)
 
         historico_pesos.append(
             pd.Series(
-                pesos.values,
-                index=pesos.index,
+                novos_pesos.values,
+                index=novos_pesos.index,
                 name=periodo_teste.index[0],
             )
         )
+
+        # Atualiza os pesos pela valorização dos ativos no período.
+        crescimento = (1 + periodo_teste / 100).prod()
+
+        pesos_valorizados = novos_pesos * crescimento
+
+        pesos_atuais = pesos_valorizados / pesos_valorizados.sum()
 
     if not resultados:
         raise ValueError("Não foi possível executar o backtest.")
